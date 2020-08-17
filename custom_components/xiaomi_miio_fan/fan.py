@@ -44,6 +44,7 @@ MODEL_FAN_ZA1 = "zhimi.fan.za1"
 MODEL_FAN_ZA3 = "zhimi.fan.za3"
 MODEL_FAN_ZA4 = "zhimi.fan.za4"
 MODEL_FAN_P5 = "dmaker.fan.p5"
+MOEDL_FAN_1C = "dmaker.fan.1c"
 
 PLATFORM_SCHEMA = PLATFORM_SCHEMA.extend(
     {
@@ -122,6 +123,16 @@ AVAILABLE_ATTRIBUTES_FAN_P5 = {
     ATTR_RAW_SPEED: "speed",
 }
 
+AVAILABLE_ATTRIBUTES_FAN_1C = {
+    ATTR_MODE: "mode",
+    ATTR_OSCILLATE: "oscillate",
+    ATTR_DELAY_OFF_COUNTDOWN: "delay_off_countdown",
+    ATTR_LED: "led",
+    ATTR_BUZZER: "buzzer",
+    ATTR_CHILD_LOCK: "child_lock",
+    ATTR_RAW_SPEED: "speed",
+}
+
 FAN_SPEED_LEVEL1 = "Level 1"
 FAN_SPEED_LEVEL2 = "Level 2"
 FAN_SPEED_LEVEL3 = "Level 3"
@@ -135,12 +146,27 @@ FAN_SPEED_LIST = {
     FAN_SPEED_LEVEL4: range(76, 101),
 }
 
+FAN_SPEED_LIST_1C = {
+    SPEED_OFF: 0,
+    FAN_SPEED_LEVEL1: 1,
+    FAN_SPEED_LEVEL2: 2,
+    FAN_SPEED_LEVEL3: 3,
+}
+
 FAN_SPEED_VALUES = {
     SPEED_OFF: 0,
     FAN_SPEED_LEVEL1: 1,
     FAN_SPEED_LEVEL2: 35,
     FAN_SPEED_LEVEL3: 74,
     FAN_SPEED_LEVEL4: 100,
+}
+
+
+FAN_SPEED_VALUES_1C = {
+    SPEED_OFF: 0,
+    FAN_SPEED_LEVEL1: 1,
+    FAN_SPEED_LEVEL2: 2,
+    FAN_SPEED_LEVEL3: 3,
 }
 
 FAN_SPEED_VALUES_P5 = {
@@ -271,6 +297,11 @@ async def async_setup_platform(hass, config, async_add_devices, discovery_info=N
 
         fan = FanP5(host, token, model=model)
         device = XiaomiFanP5(name, fan, model, unique_id, retries)
+    elif model == MOEDL_FAN_1C:
+        from .fan_1c import Fan1C
+        
+        fan = Fan1C(host, token)
+        device = XiaomiFan1C(name, fan, model, unique_id, retries)
     else:
         _LOGGER.error(
             "Unsupported device found! Please create an issue at "
@@ -666,6 +697,121 @@ class XiaomiFan(XiaomiGenericDevice):
         await self.async_set_speed(self._speed)
 
 
+class XiaomiFan1C(XiaomiFan):
+    def __init__(self, name, device, model, unique_id, retries):
+        """Initialize the fan entity."""
+        super().__init__(name, device, model, unique_id, retries)
+
+        self._device_features = FEATURE_FLAGS_FAN
+        self._available_attributes = AVAILABLE_ATTRIBUTES_FAN_1C
+        self._speed_list = list(FAN_SPEED_LIST_1C)
+        self._speed = None
+        self._oscillate = None
+        self._natural_mode = False
+
+        self._state_attrs[ATTR_SPEED] = None
+        self._state_attrs.update(
+            {attribute: None for attribute in self._available_attributes}
+        )
+
+    async def async_update(self):
+        """Fetch state from the device."""
+        from miio import DeviceException
+        from miio.fan import OperationMode
+
+        # On state change the device doesn't provide the new state immediately.
+        if self._skip_update:
+            self._skip_update = False
+            return
+
+        try:
+            state = await self.hass.async_add_job(self._device.status)
+            _LOGGER.debug("Got new state: %s", state)
+
+            self._available = True
+            self._oscillate = state.oscillate
+            self._natural_mode = state.mode == OperationMode.Nature
+            self._state = state.is_on
+
+            for level, speed in FAN_SPEED_LIST_1C.items():
+                if state.speed == speed:
+                    self._speed = level
+                    self._state_attrs[ATTR_SPEED] = level
+                    break
+
+            self._state_attrs.update(
+                {
+                    key: self._extract_value_from_attribute(state, value)
+                    for key, value in self._available_attributes.items()
+                }
+            )
+
+            self._retry = 0
+
+        except DeviceException as ex:
+            self._retry = self._retry + 1
+            if self._retry < self._retries:
+                _LOGGER.info(
+                    "Got exception while fetching the state: %s , _retry=%s",
+                    ex,
+                    self._retry,
+                )
+            else:
+                self._available = False
+                _LOGGER.error(
+                    "Got exception while fetching the state: %s , _retry=%s",
+                    ex,
+                    self._retry,
+                )
+
+    async def async_set_speed(self, speed: str) -> None:
+        """Set the speed of the fan."""
+        if self.supported_features & SUPPORT_SET_SPEED == 0:
+            return
+
+        _LOGGER.debug("Setting the fan speed to: %s", speed)
+
+        if speed.isdigit():
+            speed = int(speed)
+
+        if speed in [SPEED_OFF, 0]:
+            await self.async_turn_off()
+            return
+
+        # Map speed level to speed
+        if speed in FAN_SPEED_VALUES_1C:
+            speed = FAN_SPEED_VALUES_1C[speed]
+
+        await self._try_command(
+            "Setting fan speed of the miio device failed.",
+            self._device.set_direct_speed,
+            speed,
+        )
+
+    async def async_set_natural_mode_on(self):
+        """Turn the natural mode on."""
+        if self._device_features & FEATURE_SET_NATURAL_MODE == 0:
+            return
+
+        self._natural_mode = True
+        await self._try_command(
+            "Setting fan natural mode of the miio device failed.",
+            self._device.set_natural_mode,
+            True,
+        )
+
+    async def async_set_natural_mode_off(self):
+        """Turn the natural mode off."""
+        if self._device_features & FEATURE_SET_NATURAL_MODE == 0:
+            return
+
+        self._natural_mode = False
+        await self._try_command(
+            "Setting fan natural mode of the miio device failed.",
+            self._device.set_natural_mode,
+            False,
+        )
+
 class XiaomiFanP5(XiaomiFan):
     """Representation of a Xiaomi Pedestal Fan P5."""
 
@@ -688,7 +834,7 @@ class XiaomiFanP5(XiaomiFan):
     async def async_update(self):
         """Fetch state from the device."""
         from miio import DeviceException
-        from miio.fan import OperationMode
+        from .fan_1c import OperationMode
 
         # On state change the device doesn't provide the new state immediately.
         if self._skip_update:
@@ -792,4 +938,3 @@ class XiaomiFanP5(XiaomiFan):
             "Setting delay off miio device failed.", self._device.delay_off, 
             delay_off_countdown
         )
-    
